@@ -2,7 +2,7 @@ mod bank;
 mod serial_io;
 mod wav;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -33,7 +33,19 @@ fn run() -> Result<ExitCode> {
     port.clear(serialport::ClearBuffer::All).ok();
 
     port.write_all(b"I").context("sending I command")?;
-    let info = serial_io::read_available(port.as_mut(), Duration::from_secs(2), Duration::from_millis(300));
+    let len_prefix = serial_io::read_exact_upto(port.as_mut(), 4, Duration::from_secs(2));
+    let len_bytes: [u8; 4] = len_prefix
+        .as_slice()
+        .try_into()
+        .context("device info response missing 4-byte length prefix")?;
+    let info_len = u32::from_le_bytes(len_bytes) as usize;
+    let info = serial_io::read_exact_upto(port.as_mut(), info_len, Duration::from_secs(2));
+    if info.len() != info_len {
+        bail!(
+            "device info response truncated: expected {info_len} bytes, got {}",
+            info.len()
+        );
+    }
     let text = String::from_utf8_lossy(&info);
     println!("Device info: {text}");
 
@@ -47,6 +59,12 @@ fn run() -> Result<ExitCode> {
         .context("device info missing capacity value after 'C'")?
         .parse()
         .context("parsing capacity value")?;
+    // Sanity-bound a value we're about to trust as the flash-capacity ceiling:
+    // the device is a peer over an untrusted serial link, not a guaranteed-honest source.
+    const MAX_PLAUSIBLE_CAPACITY_BYTES: u32 = 64 * 1024 * 1024; // RP2040 flash tops out far below this
+    if capacity_bytes == 0 || capacity_bytes > MAX_PLAUSIBLE_CAPACITY_BYTES {
+        bail!("device reported implausible capacity: {capacity_bytes} bytes");
+    }
 
     let built = bank::build_bank(&sample_paths, capacity_bytes)?;
     let total_len = built.blob.len();
@@ -83,9 +101,15 @@ fn run() -> Result<ExitCode> {
     );
 
     let final_resp = serial_io::read_available(port.as_mut(), Duration::from_secs(60), Duration::from_secs(2));
-    println!("final resp: {:?}", String::from_utf8_lossy(&final_resp));
+    let final_text = String::from_utf8_lossy(&final_resp);
+    println!("final resp: {final_text:?}");
 
-    Ok(ExitCode::SUCCESS)
+    if final_text.trim() == "OK" {
+        Ok(ExitCode::SUCCESS)
+    } else {
+        println!("device rejected the upload after transfer completed");
+        Ok(ExitCode::from(1))
+    }
 }
 
 fn main() -> ExitCode {

@@ -38,7 +38,7 @@ pub fn build_bank(sample_paths: &[impl AsRef<Path>], capacity_bytes: u32) -> Res
 
     for path in sample_paths {
         let path = path.as_ref();
-        let pcm = read_wav_8bit_mono_pcm(path)?;
+        let pcm = read_wav_8bit_mono_pcm(path, PIKO_BANK_SAMPLE_RATE)?;
         let offset = audio_blob.len() as u32;
         let frame_count = pcm.len() as u32;
         audio_blob.extend_from_slice(&pcm);
